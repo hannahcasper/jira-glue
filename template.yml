@@ -1,0 +1,250 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform:
+  - AWS::Serverless-2016-10-31
+Description: >
+  jira-glue
+
+  jira glue crawler
+
+Parameters:
+  OwnerTeam:
+    Type: String
+    Default: clairvoyants
+  Environment:
+    Type: String
+    Default: test
+    AllowedValues:
+      - test
+      - prod
+
+Mappings:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: 's3://accolade-iam-action-templates-063473290800/iam_action_templates.yml'
+  EnvironmentDependentParams:
+    test:
+      ScriptS3Dir: 's3://accolade-glue-script-577121982548/jira-glue'
+      ScriptName: 'script_test.py'
+      EdwRedShiftConnectionName1: 'EdwRedShiftConnection1'
+      EdwRedShiftConnectionName2: 'EdwRedShiftConnection2'
+      EdwRedShiftConnectionName3: 'EdwRedShiftConnection3'
+      RedShiftDatabaseName: 'edw'
+    prod:
+      ScriptS3Dir: 's3://accolade-glue-script-063473290800/jira-glue'
+      ScriptName: 'script_prod.py'
+      EdwRedShiftConnectionName1: 'EdwRedShiftConnection1'
+      EdwRedShiftConnectionName2: 'EdwRedShiftConnection2'
+      EdwRedShiftConnectionName3: 'EdwRedShiftConnection3'
+      RedShiftDatabaseName: 'acp_edw'
+
+Resources:
+  DefaultDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      DatabaseInput:
+        Description: jira glue crawler database
+        Parameters:
+          foo: bar
+        Name: jira-glue
+      CatalogId: !Ref AWS::AccountId
+
+  DefaultCrawler:
+    Type: AWS::Glue::Crawler
+    DependsOn:
+      - DefaultRole
+    Properties:
+      Role: !GetAtt DefaultRole.Arn
+      # Classifiers:
+      #   - String
+      Configuration: "{\"Version\": 1.0,\"Grouping\": {\"TableGroupingPolicy\": \"CombineCompatibleSchemas\"}}"
+      Description: jira glue crawler crawler
+      SchemaChangePolicy:
+        UpdateBehavior: UPDATE_IN_DATABASE
+        DeleteBehavior: DEPRECATE_IN_DATABASE
+      Schedule:
+        ScheduleExpression: cron(0 8 * * ? *)
+      DatabaseName: !Ref DefaultDatabase
+      Targets:
+        JdbcTargets:
+          - ConnectionName: !FindInMap [EnvironmentDependentParams, !Ref "Environment", "EdwRedShiftConnectionName1"]
+            Path: !FindInMap [EnvironmentDependentParams, !Ref "Environment", "RedShiftDatabaseName"]
+      TablePrefix: jira-glue_
+      Name: jira-glue-crawler
+
+  DefaultRole:
+    Type: AWS::IAM::Role
+    DependsOn: JobResultS3
+    Properties:
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole'
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service:
+                - "glue.amazonaws.com"
+              AWS:
+                - !Sub 'arn:aws:iam::${AWS::AccountId}:role/user-${OwnerTeam}'
+            Action:
+              - sts:AssumeRole
+      Policies:
+        -
+          PolicyName: JobS3Buckets
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:ListBucket
+                  - s3:DeleteObject
+                  - s3:GetObject
+                Resource:
+                  - 'arn:aws:s3:::jira-glue-*'
+                  - !Sub 'arn:aws:s3:::accolade-glue-script-${AWS::AccountId}/jira-glue/*'
+        -
+          PolicyName: CloudwatchLogs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: Allow
+                Action:
+                  - logs:AssociateKmsKey
+                Resource:
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws-glue/jobs/*'
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws-glue/crawlers-role/*'
+
+  DefaultJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Role: !GetAtt DefaultRole.Arn
+      DefaultArguments:  # https://docs.aws.amazon.com/glue/latest/dg/aws-glue-programming-etl-glue-arguments.html#aws-glue-api-crawler-pyspark-extensions-python-intro-parameters
+        "--job-language": "python"
+        "--job-bookmark-option": "job-bookmark-disable"
+        "--enable-metrics": true
+        "--account-id": !Sub '${AWS::AccountId}'
+        "--TempDir": !Join
+        - ''
+        - -  's3://'
+          -  !Ref JobTempDirS3
+      Connections:
+        Connections:
+          - !FindInMap [EnvironmentDependentParams, !Ref "Environment", "EdwRedShiftConnectionName1"]
+          - !FindInMap [EnvironmentDependentParams, !Ref "Environment", "EdwRedShiftConnectionName2"]
+          - !FindInMap [EnvironmentDependentParams, !Ref "Environment", "EdwRedShiftConnectionName3"]
+      MaxRetries: 0
+      Description: jira glue crawler job
+      #LogUri: String
+      Command:
+        ScriptLocation: !Join
+        - '/'
+        - - !FindInMap [EnvironmentDependentParams, !Ref "Environment", "ScriptS3Dir"]
+          - !FindInMap [EnvironmentDependentParams, !Ref "Environment", "ScriptName"]
+        Name: glueetl  # the name cannot be changed
+      AllocatedCapacity: 10  # allow value is 2 to 100 DPUs, default is 10
+      ExecutionProperty:
+        MaxConcurrentRuns: 1
+      Name: jira-glue
+
+  JobResultS3:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'jira-glue-result-${AWS::AccountId}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      Tags:
+        -
+          Key: 'cf:info:owner'
+          Value: !Ref OwnerTeam
+        -
+          Key: 'cf:info:phi'
+          Value: 'yes'
+        -
+          Key: 'cf:info:sse'
+          Value: 'yes'
+
+  JobTempDirS3:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'jira-glue-temporary-${AWS::AccountId}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      Tags:
+        -
+          Key: 'cf:info:owner'
+          Value: !Ref OwnerTeam
+        -
+          Key: 'cf:info:phi'
+          Value: 'yes'
+        -
+          Key: 'cf:info:sse'
+          Value: 'yes'
+
+  DefaultJobTrigger:
+    Type: AWS::Glue::Trigger
+    Properties:
+      Type: SCHEDULED
+      Description: Scheduled trigger for jira-glue
+      Actions:
+        - JobName: !Ref DefaultJob
+      Schedule: cron(0 0/12 * * ? *)
+      Name: jira-glue-trigger
+      # Predicate:
+      #   Predicate
+
+  ResultS3Policy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref JobResultS3
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              AWS:
+                - !Sub 'arn:aws:iam::${AWS::AccountId}:role/user-${OwnerTeam}'
+            Action:
+              - s3:ListBucket
+              - s3:DeleteObject
+              - s3:GetObject
+            Resource:
+              - !Sub '${JobResultS3.Arn}'
+              - !Sub '${JobResultS3.Arn}/*'
+
+  DefaultKMSKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: 'alias/jira-glue'
+      TargetKeyId: !Ref DefaultKMSKey
+
+  DefaultKMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      EnableKeyRotation: true
+      KeyPolicy:
+        Statement:
+          - Sid: 'Allow IAM permission usage'
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: 'Allow owner team to encrypt and decrypt'
+            Effect: Allow
+            Principal:
+              AWS:
+                - !Sub 'arn:aws:iam::${AWS::AccountId}:role/user-${OwnerTeam}'
+                - !GetAtt DefaultRole.Arn
+              Service: !Sub 'logs.${AWS::Region}.amazonaws.com'
+            Action: !Split [",", !FindInMap [ IAM, kms, owner ]]
+            Resource: '*'

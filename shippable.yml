@@ -1,0 +1,106 @@
+env:
+  global:
+    - GLUE_SCRIPT_S3_TEST=accolade-glue-script-577121982548
+    - GLUE_SCRIPT_S3_PROD=accolade-glue-script-063473290800
+
+build:
+  pre_ci:
+    - aws ecr get-login --no-include-email --region us-east-1 --registry-ids 063473290800 | bash
+
+  pre_ci_boot:
+    image_name: 063473290800.dkr.ecr.us-east-1.amazonaws.com/ci-build-image/shippable-all
+    image_tag: v1
+    pull: true
+
+  ci:
+    - source /setup.sh
+    - VERSION=0.0.0-dev-${COMMIT:0:7}-${BUILD_NUMBER}
+    - if [ "$IS_RELEASE" = "true" ]; then VERSION=${RELEASE_NAME}-build.${BUILD_NUMBER}; fi
+    - sam validate
+
+    - aws s3 cp --acl bucket-owner-full-control job_scripts/ "s3://${GLUE_SCRIPT_S3_TEST}/${REPO_NAME}" --recursive
+    - aws s3 cp --acl bucket-owner-full-control job_scripts/ "s3://${GLUE_SCRIPT_S3_PROD}/${REPO_NAME}" --recursive
+
+    - source ${BUILD_SCRIPTS}/cloudformation/upload-lambda-package-and-template.sh
+    - source ${BUILD_SCRIPTS}/cloudformation/sam-prepare-tropo-params.sh
+    - tropo validate -e test -s "${STACK_NAME}" -c "$CHANGESET_NAME" -b "$S3_BUCKET_CF_TEMPLATES" -k "from-CI/${S3_KEY}"
+
+  on_success:
+    - >
+      if [ "$BRANCH" == "master" ] && [ "$IS_PULL_REQUEST" == false ]; then
+        shipctl put_resource_state "${REPO_NAME}_file" versionName "$VERSION";
+        shipctl put_resource_state "${REPO_NAME}_file" sourceName "$S3_KEY";
+        shipctl put_resource_state "${REPO_NAME}_file" ValidationChangeSetName "$CHANGESET_NAME";
+        shipctl put_resource_state "${REPO_NAME}_file" StackName "$STACK_NAME";
+      fi
+
+integrations:
+  generic:
+    - integrationName: sonar
+
+  hub:
+    - integrationName: acp-artifactory
+      type: artifactory
+
+resources:
+  - name: jira-glue_file
+    type: file
+    pointer:
+      sourceName: empty
+    seed:
+      versionName: none
+
+jobs:
+  - name: jira-glue_runCI
+    type: runCI
+    steps:
+      - OUT: jira-glue_file
+
+  - name: deploy-test-jira-glue_runSh
+    type: runSh
+    steps:
+      - IN: jira-glue_file
+      - IN: aws-test-us-east-1-cli-config
+      - TASK:
+          name: "Login to ECR"
+          runtime:
+            container: false
+          script:
+            - aws ecr get-login --no-include-email --region us-east-1 --registry-ids 063473290800 | bash
+      - TASK:
+          name: "Deploy using Tropopause"
+          runtime:
+            options:
+              imageName: 063473290800.dkr.ecr.us-east-1.amazonaws.com/ci-build-image/shippable-all
+              imageTag: v1
+              pull: true
+          script:
+            - STACK_NAME="$(shipctl get_resource_version_key jira-glue_file StackName)"
+            - VERSION="$(shipctl get_resource_version_key jira-glue_file versionName)"
+            - S3_KEY="$(shipctl get_resource_version_key jira-glue_file sourceName)"
+            - tropo apply --tropopause-config-environment test -e test -s "${STACK_NAME}" -c $VERSION -k $S3_KEY
+
+  - name: deploy-prod-jira-glue_runSh
+    type: runSh
+    steps:
+      - IN: jira-glue_file
+        switch: off
+      - IN: aws-prod-us-east-1-cli-config
+      - TASK:
+          name: "Login to ECR"
+          runtime:
+            container: false
+          script:
+            - aws ecr get-login --no-include-email --region us-east-1 --registry-ids 063473290800 | bash
+      - TASK:
+          name: "Deploy using Tropopause"
+          runtime:
+            options:
+              imageName: 063473290800.dkr.ecr.us-east-1.amazonaws.com/ci-build-image/shippable-all
+              imageTag: v1
+              pull: true
+          script:
+            - STACK_NAME="$(shipctl get_resource_version_key jira-glue_file StackName)"
+            - VERSION="$(shipctl get_resource_version_key jira-glue_file versionName)"
+            - S3_KEY="$(shipctl get_resource_version_key jira-glue_file sourceName)"
+            - tropo apply --tropopause-config-environment prod -e prod -s $STACK_NAME -c $VERSION -k $S3_KEY
