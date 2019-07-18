@@ -6,7 +6,7 @@ jira glue crawler
 ### How to Configure the AWS Glue Service
 
 * Register this newly created project in [acmdb-data](https://github.com/konciergeMD/acmdb-data).
-* Two dummy `script_test.py` and `script_prod.py` files have been created as part of the cookiecutter under folder `job_scripts`. Please modify them for your use case. All ETL scripts should be added to this folder. Please refer to [AWS Glue Programming](https://docs.aws.amazon.com/glue/latest/dg/aws-glue-programming.html) to learn more about the programming for glue.
+* Two dummy `script_test.py` and `script_prod.py` files have been created as part of the cookiecutter under folder `job_scripts`. Please modify them for your use case. All ETL scripts should be added to this folde. Please refer to [AWS Glue Programming](https://docs.aws.amazon.com/glue/latest/dg/aws-glue-programming.html) to learn more about the programming for glue.
 * The `template.yml` file can be modified to add additional AWS resources if it is needed by the aws glue service.
 * Git init the newly created project locally. Create a new repository in github. Push your project to github.
 * Enable the CI and pipeline in shippable.
